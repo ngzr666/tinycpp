@@ -3,6 +3,7 @@
 #include "common.h"
 #include "token.h"
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -24,7 +25,7 @@ private:
   void expect(const char* s);
   std::string expectIdent();
   bool atEof() const;
-  void skipBalanced(const char* open, const char* close);
+  void skipBalanced(const char* open, const char* close, bool quiet = false);
   void skipAttributes();
 
   // scopes / symbols
@@ -134,11 +135,15 @@ private:
   StructDecl* currentClass_ = nullptr;
   FuncDecl* currentFunc_ = nullptr;
   bool externC_ = false;
+  int lambdaCounter_ = 0;
 
-  struct TemplateFunc { std::string name; std::vector<std::string> params; std::vector<Token> tokens; SourceLoc loc; };
+  struct TemplateFunc { std::string name; std::vector<std::string> params; std::vector<Token> tokens; SourceLoc loc; bool hasPack=false; std::string packName; bool isStruct=false; };
   std::vector<TemplateFunc> templates_;
+  std::set<std::string> triedInstantiations_;
   void parseTemplateFunc();
   FuncDecl* instantiateTemplate(const TemplateFunc& tf, const std::vector<ExprPtr>& args, SourceLoc loc);
+  StructDecl* instantiateTemplateStruct(const TemplateFunc& tf, const std::vector<Type*>& typeArgs, SourceLoc loc);
+  std::string typeKey(Type* t);
 };
 
 } // namespace tc

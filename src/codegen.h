@@ -4,12 +4,14 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <set>
 
 namespace tc {
 
 class CodeGen {
 public:
   CodeGen(Program& prog, Diag& diag);
+  void setAbortAssert(bool v) { abortAssert_ = v; }
   std::string generate();
 
 private:
@@ -61,7 +63,10 @@ private:
   std::vector<std::vector<VarSym*>> cleanupScopes_;
   std::vector<size_t> breakDepths_;
   FuncDecl* curFunc_ = nullptr;
+  bool abortAssert_ = false;
   int temp_ = 0;
+  std::string promotedGlobals_;
+  std::set<std::string> emittedPromoted_;
 };
 
 } // namespace tc

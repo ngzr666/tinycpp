@@ -77,6 +77,7 @@ struct VarSym {
   ExprPtr defaultArg;
   ExprPtr init;                    // global initializer
   std::vector<ExprPtr> initList;   // brace initializer
+  FuncDecl* funcRef = nullptr;     // holds lambda/function reference
   SourceLoc loc;
 };
 
@@ -171,6 +172,7 @@ struct Expr {
   bool arrow = false;
   bool isArrayNew = false;
   bool globalScope = false;
+  FuncDecl* funcRef = nullptr;     // function reference (lambda)
 };
 
 enum class StmtKind {

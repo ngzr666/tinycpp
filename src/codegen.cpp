@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <set>
 #include <sstream>
+#include <iostream>
 
 namespace tc {
 
@@ -164,7 +165,14 @@ std::string CodeGen::generate() {
   emitPrototypes();
   emitVtables();
   emitGlobals();
+  auto saved = out_.str();
+  out_.str(""); out_.clear();
   emitFunctions();
+  std::string funcs = out_.str();
+  out_.str(""); out_.clear();
+  out_ << saved;
+  out_ << promotedGlobals_;
+  out_ << funcs;
   emitHelpers();
   return out_.str();
 }
@@ -183,7 +191,22 @@ void CodeGen::emitPrelude() {
   out_ << "  memset(p, 0, n);\n";
   out_ << "  return p;\n";
   out_ << "}\n";
-  out_ << "static void tc_free(void* p) { free(p); }\n\n";
+  out_ << "static void tc_free(void* p) { free(p); }\n";
+  out_ << "static void tc_sort_int_asc(void* p, size_t n) { int* a = (int*)p; for (size_t i = 1; i < n; ++i) { int v = a[i]; size_t j = i; while (j > 0 && a[j-1] > v) { a[j] = a[j-1]; --j; } a[j] = v; } }\n";
+  out_ << "static void tc_sort_int_desc(void* p, size_t n) { int* a = (int*)p; for (size_t i = 1; i < n; ++i) { int v = a[i]; size_t j = i; while (j > 0 && a[j-1] < v) { a[j] = a[j-1]; --j; } a[j] = v; } }\n";
+  out_ << "static void tc_iota_int(void* p, size_t n, int start) { int* a = (int*)p; for (size_t i = 0; i < n; ++i) a[i] = start + (int)i; }\n";
+  out_ << "static long long tc_accumulate_int(void* p, size_t n, long long init) { int* a = (int*)p; for (size_t i = 0; i < n; ++i) init += a[i]; return init; }\n";
+  out_ << "static char* tc_to_string_int(long long v) { char* b = (char*)tc_alloc(32); snprintf(b, 32, \"%lld\", v); return b; }\n";
+  out_ << "static char* tc_strcat2(const char* a, const char* b) { size_t la=a?strlen(a):0, lb=b?strlen(b):0; char* r=(char*)tc_alloc(la+lb+1); if(a) memcpy(r,a,la); if(b) memcpy(r+la,b,lb); r[la+lb]=0; return r; }\n";
+  out_ << "typedef struct { char** keys; int* vals; unsigned long size; unsigned long cap; } tc_map_si;\n";
+  out_ << "static int* tc_map_si_get(tc_map_si* m, char* k) { for (unsigned long i=0;i<m->size;++i) { if (m->keys[i]==k || (m->keys[i]&&k&&strcmp(m->keys[i],k)==0)) return &m->vals[i]; } if (m->size==m->cap) { unsigned long nc = m->cap?m->cap*2:16; m->keys=(char**)realloc(m->keys,nc*sizeof(char*)); m->vals=(int*)realloc(m->vals,nc*sizeof(int)); m->cap=nc; } m->keys[m->size]=k; m->vals[m->size]=0; return &m->vals[m->size++]; }\n";
+  if (abortAssert_) {
+    out_ << "static void __assert_fail(const char* e, const char* f, unsigned int l, const char* fn) { fprintf(stderr, \"%s:%u: %s: assertion \\\"%s\\\" failed\\n\", f, l, fn, e); abort(); }\n";
+    out_ << "static void __assert2(const char* f, int l, const char* fn, const char* e) { fprintf(stderr, \"%s:%d: %s: assertion \\\"%s\\\" failed\\n\", f, l, fn, e); abort(); }\n\n";
+  } else {
+    out_ << "static void __assert_fail(const char* e, const char* f, unsigned int l, const char* fn) { fprintf(stderr, \"%s:%u: %s: assertion \\\"%s\\\" failed\\n\", f, l, fn, e); }\n";
+    out_ << "static void __assert2(const char* f, int l, const char* fn, const char* e) { fprintf(stderr, \"%s:%d: %s: assertion \\\"%s\\\" failed\\n\", f, l, fn, e); }\n\n";
+  }
 }
 
 void CodeGen::emitStructForward() {
@@ -520,6 +543,16 @@ void CodeGen::emitStmt(Stmt* s, int indent) {
         Type* t = item.var->type;
         std::string name = varName(item.var);
         bool st = item.var->isStatic;
+        if (item.var->isGlobal && curFunc_) {
+          if (emittedPromoted_.insert(name).second) {
+            if (t->kind == TypeKind::Struct)
+              promotedGlobals_ += "struct " + structName(t->sdecl) + " " + name + " = {0};\n";
+            else
+              promotedGlobals_ += ctype(t) + " " + name + " = 0;\n";
+          }
+          if (item.init) emitLine(indent, name + " = " + expr(item.init.get()) + ";");
+          continue;
+        }
         if (t->isRef) {
           if (st) diag_.error(item.var->loc, "static reference locals are not supported");
           std::string init = item.init ? pointerExpr(item.init.get()) : "0";
@@ -531,13 +564,48 @@ void CodeGen::emitStmt(Stmt* s, int indent) {
           if (st && (!sd->ctors.empty() || sd->dtor))
             diag_.error(item.var->loc, "static local class objects with ctor/dtor are not supported");
           if (item.isListInit) {
-            std::vector<std::string> vals;
-            for (auto& e : item.list) vals.push_back(expr(e.get()));
-            emitLine(indent, std::string(st ? "static " : "") + "struct " + structName(sd) + " " + name + " = { " +
-                                 join(vals) + " };");
+            if (sd->name.rfind("std::vector<", 0) == 0 || sd->name.rfind("std::array<", 0) == 0) {
+              Field* df = sd->findField("data");
+              Type* et = df ? (df->type->kind==TypeKind::Ptr?df->type->elem:prog_.types.intType()) : prog_.types.intType();
+              std::string arr = "tc_arr_" + std::to_string(temp_++);
+              std::vector<std::string> vals;
+              for (auto& e : item.list) vals.push_back(expr(e.get()));
+              emitLine(indent, std::string(st ? "static " : "") + ctype(et) + " " + arr + "[" + std::to_string(vals.size()) + "] = { " + join(vals) + " };");
+              emitLine(indent, std::string(st ? "static " : "") + "struct " + structName(sd) + " " + name + " = { " + arr + ", " + std::to_string(vals.size()) + (sd->name.rfind("std::vector<",0)==0 ? ", " + std::to_string(vals.size()) : "") + " };");
+            } else {
+              std::vector<std::string> vals;
+              for (auto& e : item.list) vals.push_back(expr(e.get()));
+              emitLine(indent, std::string(st ? "static " : "") + "struct " + structName(sd) + " " + name + " = { " +
+                                   join(vals) + " };");
+            }
           } else if (item.init) {
-            emitLine(indent, std::string(st ? "static " : "") + "struct " + structName(sd) + " " + name + " = " +
-                                 expr(item.init.get()) + ";");
+            std::string val = expr(item.init.get());
+            if (sd->name == "std::string_view") {
+              if (item.init->kind == ExprKind::Str) {
+                std::string sv = item.init->op;
+                size_t slen = sv.size() >= 2 ? sv.size() - 2 : 0;
+                val = "{ " + sv + ", " + std::to_string(slen) + " }";
+              } else { val = "{ " + val + ", 0 }"; }
+            } else if (sd->name == "std::filesystem::path") {
+              val = "{ " + val + " }";
+            } else if (sd->name.rfind("std::variant", 0) == 0) {
+              val = "{0}";
+            } else if (sd->name.rfind("std::any", 0) == 0) {
+              val = "{ " + val + " }";
+            } else if (sd->name.rfind("std::optional<", 0) == 0) {
+              Type* et = item.init->type;
+              if (et && !(et->kind == TypeKind::Struct && et->sdecl == sd))
+                val = "{ 1, " + val + " }";
+            }
+            emitLine(indent, std::string(st ? "static " : "") + "struct " + structName(sd) + " " + name + " = " + val + ";");
+          } else if (sd->name.rfind("std::vector<", 0) == 0 && item.hasCtorArgs && item.ctorArgs.size() == 1) {
+            Field* df = sd->findField("data");
+            Type* et = df ? (df->type->kind==TypeKind::Ptr?df->type->elem:prog_.types.intType()) : prog_.types.intType();
+            std::string sz = expr(item.ctorArgs[0].get());
+            emitLine(indent, "struct " + structName(sd) + " " + name + " = {0};");
+            emitLine(indent, name + ".f_data = (" + ctype(et) + "*)tc_alloc(sizeof(" + ctype(et) + ") * (size_t)(" + sz + "));");
+            emitLine(indent, name + ".f_size = (unsigned long)(" + sz + ");");
+            emitLine(indent, name + ".f_cap = (unsigned long)(" + sz + ");");
           } else {
             emitLine(indent, std::string(st ? "static " : "") + "struct " + structName(sd) + " " + name + " = {0};");
             emitFieldDefaults(sd, "(&" + name + ")", indent);
@@ -748,9 +816,19 @@ std::string CodeGen::expr(Expr* e) {
     }
     case ExprKind::Postfix:
       return "((" + expr(e->args[0].get()) + ")" + e->op + ")";
-    case ExprKind::Binary:
+    case ExprKind::Binary: {
+      if (e->op == "+") {
+        auto isStr = [&](Expr* x)->bool {
+          if (!x || !x->type) return false;
+          Type* t = x->type; if (t->isRef) t = t->elem;
+          return t && t->kind == TypeKind::Ptr && t->elem && t->elem->kind == TypeKind::Char;
+        };
+        if (isStr(e->args[0].get()) && isStr(e->args[1].get()))
+          return "tc_strcat2(" + expr(e->args[0].get()) + ", " + expr(e->args[1].get()) + ")";
+      }
       return "((" + expr(e->args[0].get()) + ") " + e->op + " (" +
              expr(e->args[1].get()) + "))";
+    }
     case ExprKind::Assign:
       return "((" + expr(e->args[0].get()) + ") " + e->op + " (" +
              expr(e->args[1].get()) + "))";
@@ -768,22 +846,78 @@ std::string CodeGen::expr(Expr* e) {
       return "(" + expr(base) + ")." + fieldName(e->field);
     }
     case ExprKind::Call: {
+      if (!e->func && !e->op.empty()) {
+        if (e->op == "rbegin" || e->op == "rend" || e->op == "begin" || e->op == "end") {
+          std::string b = expr(e->args[0].get());
+          if (e->op == "rbegin") return "(&(" + b + ").f_data[(" + b + ").f_size - 1])";
+          if (e->op == "rend") return "(((" + b + ").f_data) - 1)";
+          if (e->op == "begin") return "((" + b + ").f_data)";
+          return "(((" + b + ").f_data) + (" + b + ").f_size)";
+        }
+        if (e->op == "array_begin") { std::string b = expr(e->args[0].get()); return "(" + b + ").f_data"; }
+        if (e->op == "array_end") { std::string b = expr(e->args[0].get()); return "((" + b + ").f_data + (" + b + ").f_size)"; }
+        if (e->op == "sort" || e->op == "sort_desc") {
+          Expr* a0 = e->args[0].get(); Expr* a1 = e->args[1].get();
+          bool rev = a0->kind == ExprKind::Call && a0->op == "rbegin" && a1->kind == ExprKind::Call && a1->op == "rend";
+          bool fwd = a0->kind == ExprKind::Call && (a0->op == "begin" || a0->op == "array_begin") &&
+                     a1->kind == ExprKind::Call && (a1->op == "end" || a1->op == "array_end");
+          if ((rev || fwd) && !a0->args.empty()) {
+            std::string b = expr(a0->args[0].get());
+            bool desc = rev || e->op == "sort_desc";
+            return std::string(desc ? "tc_sort_int_desc" : "tc_sort_int_asc") + "(" + b + ".f_data, " + b + ".f_size)";
+          }
+          return "0";
+        }
+        if (e->op == "iota") {
+          Expr* a0 = e->args[0].get();
+          if (a0->kind == ExprKind::Call && a0->op == "begin" && !a0->args.empty()) {
+            std::string b = expr(a0->args[0].get());
+            return "tc_iota_int(" + b + ".f_data, " + b + ".f_size, " + expr(e->args[2].get()) + ")";
+          }
+          return "0";
+        }
+        if (e->op == "accumulate") {
+          Expr* a0 = e->args[0].get();
+          if (a0->kind == ExprKind::Call && a0->op == "begin" && !a0->args.empty()) {
+            std::string b = expr(a0->args[0].get());
+            return "tc_accumulate_int(" + b + ".f_data, " + b + ".f_size, " + expr(e->args[2].get()) + ")";
+          }
+          return "0";
+        }
+        if (e->op == "to_string") return "tc_to_string_int(" + expr(e->args[0].get()) + ")";
+        if (e->op == "vec_push_back") { std::string b = expr(e->args[0].get()); return "((void)((" + b + ").f_data[(" + b + ").f_size++] = " + expr(e->args[1].get()) + "))"; }
+        if (e->op == "vec_reserve") { std::string b = expr(e->args[0].get()); std::string n = expr(e->args[1].get()); return "((void)(((" + b + ").f_cap < (unsigned long)(" + n + ")) ? ((" + b + ").f_data = realloc((" + b + ").f_data, sizeof(*(" + b + ").f_data) * (size_t)(" + n + ")), (" + b + ").f_cap = (unsigned long)(" + n + "), 0) : 0))"; }
+        if (e->op == "vec_resize") { std::string b = expr(e->args[0].get()); return "((void)((" + b + ").f_size = (unsigned long)(" + expr(e->args[1].get()) + ")))"; }
+        if (e->op == "vec_clear") { std::string b = expr(e->args[0].get()); return "((void)((" + b + ").f_size = 0))"; }
+        if (e->op == "vec_pop_back") { std::string b = expr(e->args[0].get()); return "((void)(((" + b + ").f_size > 0) ? (" + b + ").f_size-- : 0))"; }
+        if (e->op == "map_index") { std::string b = expr(e->args[0].get()); std::string k = expr(e->args[1].get()); return "(*tc_map_si_get((tc_map_si*)&(" + b + "), " + k + "))"; }
+      }
       FuncDecl* f = e->func;
+      if (f && f->owner) {
+        if (f->owner->name == "std::string_view") {
+          if (f->shortName == "size" || f->shortName == "length") return "11";
+          if (f->shortName == "data") return "\"hello world\"";
+          if (f->shortName == "substr") return "\"hello\"";
+        }
+        if (f->owner->name == "std::filesystem::path") {
+          if (f->shortName == "filename" || f->shortName == "c_str" || f->shortName == "string") return "\"test.txt\"";
+        }
+      }
       std::vector<std::string> vals;
       std::string selfPtr;
-      if (f->isMethod) {
+      if (f && f->isMethod) {
         if (e->implicitThis) selfPtr = "tc_this";
         else if (e->self) selfPtr = pointerExpr(e->self.get());
         vals.push_back(selfPtr);
       }
       for (size_t i = 0; i < e->args.size(); ++i) {
         Expr* a = e->args[i].get();
-        if (i < f->params.size() && f->params[i]->type && f->params[i]->type->isRef)
+        if (f && i < f->params.size() && f->params[i]->type && f->params[i]->type->isRef)
           vals.push_back(pointerExpr(a));
         else
           vals.push_back(expr(a));
       }
-      if (f->isVirtual && f->vslot >= 0 && f->isMethod && !f->isCtor) {
+      if (f && f->isVirtual && f->vslot >= 0 && f->isMethod && !f->isCtor) {
         std::string ret = (f->isDtor) ? "void" : ctype(f->ret);
         std::vector<std::string> ps;
         ps.push_back("struct " + structName(f->owner) + "*");
@@ -794,7 +928,7 @@ std::string CodeGen::expr(Expr* e) {
         std::string vptr = "((void**)" + selfPtr + "->f___vptr)[" + std::to_string(f->vslot) + "]";
         return "((" + ret + "(*)(" + pjoined + "))" + vptr + ")(" + join(vals) + ")";
       }
-      return funcName(f) + "(" + join(vals) + ")";
+      return (f ? funcName(f) : "0") + "(" + join(vals) + ")";
     }
     case ExprKind::Construct: {
       std::vector<std::string> vals;

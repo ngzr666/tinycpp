@@ -1,0 +1,9 @@
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/tcpp_core.dir
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/tcpp.dir
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/tcpp_shared.dir
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/edit_cache.dir
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/rebuild_cache.dir
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/list_install_components.dir
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/install.dir
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/install/local.dir
+/data/data/com.termux/files/home/tinycpp/build/CMakeFiles/install/strip.dir

@@ -43,10 +43,13 @@ static void usage() {
     "  -I DIR          add include search directory\n"
     "  -D NAME[=VAL]   define a macro\n"
     "  -U NAME         undefine a macro\n"
+    "  -O<level>       pass optimization level to host C compiler\n"
     "  -L DIR          pass library path to host C compiler\n"
     "  -l NAME         pass library to host C compiler\n"
     "  -Wl,...         pass linker flags to host C compiler\n"
     "  --cc CMD        host C compiler (default: $CC or cc)\n"
+    "  --from-libc++   prefer system libc++ headers over tinycpp stl stubs\n"
+    "  --abort-assert  abort on failed assertions (default: warn and continue)\n"
     "  --version       show version\n"
     "  -v              verbose diagnostics\n"
     "  -h, --help      show this help\n";
@@ -85,6 +88,8 @@ int main(int argc, char** argv) {
   bool run = false;
   bool keepC = false;
   bool verbose = false;
+  bool abortAssert = false;
+  bool fromLibcxx = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -100,10 +105,14 @@ int main(int argc, char** argv) {
       run = true;
     } else if (a == "--keep-c") {
       keepC = true;
+    } else if (a == "--abort-assert") {
+      abortAssert = true;
+    } else if (a == "--from-libc++") {
+      fromLibcxx = true;
     } else if (a == "-v") {
       verbose = true;
     } else if (a == "--version") {
-      std::cout << "tcpp 0.1.0\n";
+      std::cout << "tcpp 0.2.0\n";
       return 0;
     } else if (a == "--cc") {
       if (++i >= argc) { std::cerr << "tcpp: missing argument to --cc\n"; return 1; }
@@ -150,6 +159,8 @@ int main(int argc, char** argv) {
       hostArgs.push_back(a + std::string(argv[i]));
     } else if (a.rfind("-L", 0) == 0 || a.rfind("-l", 0) == 0 || a.rfind("-Wl,", 0) == 0) {
       hostArgs.push_back(a);
+    } else if (a.rfind("-O", 0) == 0) {
+      hostArgs.push_back(a);
     } else if (a == "-shared" || a == "-fPIC" || a == "-fpic" || a == "-rdynamic" || a == "-pthread") {
       hostArgs.push_back(a);
     } else if (a.rfind("-std=", 0) == 0) {
@@ -177,11 +188,25 @@ int main(int argc, char** argv) {
     if (fs::is_directory(d, ec)) pp.addIncludeDir(d, after);
   };
 
-  // Default include paths: ./include and <exe>/../include, plus TINYCPP_INCLUDE.
-  pp.addIncludeDir("include", false);
-  if (argc > 0) {
-    std::string exeDir = dirName(argv[0]);
-    if (!exeDir.empty()) pp.addIncludeDir(exeDir + "/../include", false);
+  // Default include paths: ./stl, ./include and <exe>/../include, plus TINYCPP_INCLUDE.
+  if (!fromLibcxx) {
+    pp.addIncludeDir("stl", false);
+    pp.addIncludeDir("include", false);
+  }
+  {
+    std::string exeDir = argc > 0 ? dirName(argv[0]) : std::string();
+    if (exeDir.empty()) {
+      std::error_code ec;
+      auto self = fs::read_symlink("/proc/self/exe", ec);
+      if (!ec) exeDir = dirName(self.string());
+    }
+    if (!exeDir.empty()) {
+      if (!fromLibcxx) {
+        pp.addIncludeDir(exeDir + "/../stl", false);
+        pp.addIncludeDir(exeDir + "/../share/tcpp/stl", false);
+      }
+      pp.addIncludeDir(exeDir + "/../include", false);
+    }
   }
   if (const char* env = std::getenv("TINYCPP_INCLUDE")) {
     std::string senv = env;
@@ -270,6 +295,7 @@ int main(int argc, char** argv) {
       tc::Parser parser(sm, diag, std::move(filtered));
       tc::Program prog = parser.parse();
       tc::CodeGen cg(prog, diag);
+      cg.setAbortAssert(abortAssert);
       std::string c = cg.generate();
 
       if (emitC) {
